@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ city }} — Weather Station</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<main class="station">
+
+  <header class="masthead">
+    <p class="eyebrow">Weather Station</p>
+    <form class="search" action="/" method="get" role="search">
+      <input type="search" name="city" value="{{ city }}"
+             aria-label="City" placeholder="Search a city" autocomplete="off">
+      <input type="hidden" name="units" value="{{ units }}">
+      <button type="submit">Look up</button>
+    </form>
+    <a class="units"
+       href="/?city={{ city }}&units={{ 'metric' if units == 'imperial' else 'imperial' }}">
+      {{ '°C' if units == 'imperial' else '°F' }}
+    </a>
+  </header>
+
+  {% if error %}
+    <p class="error">{{ error }}</p>
+  {% else %}
+
+  <section class="reading">
+    <div class="place">
+      <h1>{{ place.name }}</h1>
+      <p class="region">{{ place.region }}</p>
+      <p class="summary {{ 'night' if not current.is_day }}">{{ current.summary }}</p>
+    </div>
+    <div class="now">
+      <p class="temp">{{ current.temp }}<span class="degree">°{{ degree }}</span></p>
+      <p class="feels">Feels like {{ current.feels }}°</p>
+    </div>
+  </section>
+
+  {% if trace %}
+  <section class="trace" aria-label="Temperature over the next 24 hours">
+    <div class="trace-head">
+      <span>Next 24 hours</span>
+      <span class="range">{{ trace.low }}° low · {{ trace.high }}° high</span>
+    </div>
+    <svg viewBox="0 0 {{ trace.width }} {{ trace.height }}" preserveAspectRatio="none"
+         role="img" aria-label="Line chart of hourly temperature">
+      <polygon class="fill" points="{{ trace.area }}"></polygon>
+      <polyline class="line" points="{{ trace.line }}"></polyline>
+      <circle class="mark" cx="{{ trace.points[0].x }}" cy="{{ trace.points[0].y }}" r="4"></circle>
+    </svg>
+    <ol class="hours">
+      {% for point in hourly %}
+        {% if loop.index0 % 4 == 0 %}<li>{{ point.hour }}</li>{% endif %}
+      {% endfor %}
+    </ol>
+  </section>
+  {% endif %}
+
+  <dl class="instruments">
+    <div><dt>Wind</dt><dd>{{ current.wind }} <span>{{ speed }}</span></dd></div>
+    <div><dt>Humidity</dt><dd>{{ current.humidity }}<span>%</span></dd></div>
+    <div><dt>Sunrise</dt><dd>{{ sunrise }}</dd></div>
+    <div><dt>Sunset</dt><dd>{{ sunset }}</dd></div>
+  </dl>
+
+  <section class="outlook">
+    <h2>Five days</h2>
+    {% for day in days %}
+    <div class="day">
+      <span class="label">{{ day.label }}</span>
+      <span class="conditions">{{ day.summary }}</span>
+      <span class="low">{{ day.low }}°</span>
+      <span class="bar">
+        <span class="span" style="margin-left: {{ day.offset }}%; width: {{ day.length }}%"></span>
+      </span>
+      <span class="high">{{ day.high }}°</span>
+    </div>
+    {% endfor %}
+  </section>
+
+  {% endif %}
+
+  <footer>Readings from Open-Meteo</footer>
+</main>
+</body>
+</html>
