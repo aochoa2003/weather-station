@@ -3,8 +3,8 @@ A small weather website built with Flask and the Open-Meteo API,
 with the National Weather Service Area Forecast Discussion layered on top.
 
 The page's colour scheme is derived from the actual sky at the searched
-location -- see build_sky() near the bottom. Nothing is hardcoded; a clear
-noon and an overcast midnight produce genuinely different pages.
+location -- see build_sky(). Nothing is hardcoded; a clear noon and an
+overcast midnight produce genuinely different pages.
 
 Start it with:  python app.py
 Then open:      http://127.0.0.1:5000
@@ -18,6 +18,8 @@ import re
 import time
 import traceback
 from datetime import datetime, timedelta
+from math import cos, pi, sin
+from urllib.parse import quote_plus
 
 import requests
 from flask import Flask, render_template, request
@@ -25,7 +27,7 @@ from flask import Flask, render_template, request
 app = Flask(__name__)
 
 # --- CHANGE THIS to your own email address --------------------------------
-CONTACT = "mexico.ao92@gmail.com"
+CONTACT = "you@example.com"
 # --------------------------------------------------------------------------
 
 GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
@@ -35,6 +37,21 @@ NWS_POINT_URL = "https://api.weather.gov/points/{lat},{lon}"
 NWS_LIST_URL = "https://api.weather.gov/products/types/AFD/locations/{office}"
 NWS_PRODUCT_URL = "https://api.weather.gov/products/{product_id}"
 
+# Two authorities, two legal situations worth knowing apart.
+#
+# The AMS Glossary is peer-reviewed and copyrighted -- we link to it and
+# never copy from it. Its MediaWiki entries don't always use the spelling
+# you'd expect, so routing through search avoids handing anyone a 404.
+#
+# The NWS glossary is a US government work and therefore public domain,
+# so its text COULD legally be copied in. It's linked rather than copied
+# because they publish no API, and scraping their HTML would break the
+# first time they redesign. Their index is addressed by first letter.
+AMS_SEARCH_URL = (
+    "https://glossary.ametsoc.org/wiki/Special:Search?search={term}"
+)
+NWS_GLOSSARY_URL = "https://w1.weather.gov/glossary/index.php?letter={letter}"
+
 NWS_HEADERS = {
     "User-Agent": f"weather-station-hobby-project ({CONTACT})",
     "Accept": "application/geo+json",
@@ -43,6 +60,14 @@ NWS_HEADERS = {
 _point_cache = {}
 _afd_cache = {}
 AFD_TTL = 900
+
+# Open-Meteo is free but rate-limited, and a public site gets hit by
+# crawlers around the clock. Caching here is what keeps a hobby project
+# under the quota: city coordinates never change, and a forecast is still
+# perfectly good ten minutes after it was fetched.
+_geocode_cache = {}
+_forecast_cache = {}
+FORECAST_TTL = 600
 
 AFD_SECTION = re.compile(r"^\.([A-Z][^\n.]{1,90})\.\.\.", re.MULTILINE)
 AFD_TIMESTAMP = re.compile(r"^\d{3,4}\s+(AM|PM)\s+\w{2,4}\s+\w{3}\s+\w{3}", re.I)
@@ -83,7 +108,110 @@ COMPASS = [
     "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW",
 ]
 
-# Daytime gradient for each kind of sky: horizon-down, mid, zenith.
+# Plain-language explanations written for this site. The AMS Glossary is
+# copyrighted, so none of its wording appears here -- each entry links out
+# to the authoritative definition instead.
+GLOSSARY = {
+    "wind": {
+        "title": "Wind speed and direction",
+        "lookup": "wind speed",
+        "text": "The horizontal movement of air, averaged over a short "
+        "period rather than caught at one instant. Direction names where "
+        "the wind is coming FROM, not where it's headed: a west wind "
+        "blows out of the west. This is the opposite of how ocean "
+        "currents are named, which catches people out constantly.",
+    },
+    "gust": {
+        "title": "Gust",
+        "lookup": "gust",
+        "text": "A brief surge well above the sustained wind speed, "
+        "lasting seconds. Gusts do most of the damage. Sustained wind "
+        "bends a tree; the gust is what breaks the limb.",
+    },
+    "humidity": {
+        "title": "Relative humidity",
+        "lookup": "relative humidity",
+        "text": "How much water vapour the air holds, as a percentage of "
+        "the most it could hold at its current temperature. The catch is "
+        "that the ceiling rises as air warms, so humidity can fall from "
+        "90% to 45% over a morning without a single molecule of water "
+        "leaving the air. That's why it's a poor guide to how muggy it "
+        "actually feels.",
+    },
+    "dew-point": {
+        "title": "Dew point",
+        "lookup": "dewpoint",
+        "text": "The temperature air would have to cool to before water "
+        "starts condensing out of it. Unlike relative humidity it barely "
+        "moves as the day warms, which is why forecasters trust it as the "
+        "honest measure of mugginess. Roughly: below 55°F is comfortable, "
+        "above 65°F is sticky, above 75°F is oppressive. It also tells "
+        "you the overnight low, since temperature rarely falls much past "
+        "the dew point.",
+    },
+    "feels-like": {
+        "title": "Apparent temperature",
+        "lookup": "apparent temperature",
+        "text": "An estimate of what your skin reports rather than what "
+        "the thermometer does, combining air temperature with humidity, "
+        "wind and sunshine. Humid summer air blocks sweat from "
+        "evaporating so it runs above the real figure; winter wind "
+        "strips heat away so it runs below.",
+    },
+    "uv-index": {
+        "title": "UV index",
+        "lookup": "ultraviolet index",
+        "text": "A scale of sunburn-causing ultraviolet radiation "
+        "reaching the ground, starting at 0 with no upper bound in "
+        "practice. It peaks near solar noon, climbs with altitude, and "
+        "reflects off snow and water. Denver runs higher than sea-level "
+        "cities at the same latitude for exactly that reason.",
+    },
+    "rain-chance": {
+        "title": "Probability of precipitation",
+        "lookup": "probability of precipitation",
+        "text": "The likelihood that measurable precipitation falls at "
+        "your specific spot during the period. The common misreading is "
+        "to treat 40% as 'light rain' or 'rain over 40% of the area' — "
+        "it means four chances in ten that rain reaches you at all.",
+    },
+    "cloud-cover": {
+        "title": "Cloud cover",
+        "lookup": "cloud cover",
+        "text": "The fraction of visible sky obscured by cloud. "
+        "Observers traditionally divide the sky into eighths, called "
+        "oktas, which is where the terms few, scattered, broken and "
+        "overcast come from in aviation reports.",
+    },
+    "pressure": {
+        "title": "Mean sea level pressure",
+        "lookup": "sea level pressure",
+        "text": "The weight of the atmosphere above you, mathematically "
+        "corrected to sea level so that Denver and Miami can be compared "
+        "on the same map. The trend matters more than the number: "
+        "falling pressure generally means a system is moving in, rising "
+        "means it's settling. That's what the barometer on your "
+        "grandparents' wall was actually measuring.",
+    },
+    "visibility": {
+        "title": "Visibility",
+        "lookup": "visibility",
+        "text": "The greatest distance at which a suitable object can be "
+        "seen and identified. Cut down by fog, heavy precipitation, "
+        "blowing snow, smoke or dust. It's the number aviation cares "
+        "about most, which is why it appears in every airport report.",
+    },
+    "discussion": {
+        "title": "Area Forecast Discussion",
+        "lookup": "forecast",
+        "text": "A narrative written by the forecasters on shift at a "
+        "local NWS office, explaining their reasoning: which computer "
+        "model they trust today, where they disagree with it, and what "
+        "they're uncertain about. It isn't automated and isn't written "
+        "for the public, which is exactly what makes it worth reading.",
+    },
+}
+
 CONDITION_STOPS = {
     "clear": ("#B9DCF5", "#5FA3E0", "#1B62B5"),
     "cloudy": ("#C2CFD9", "#7E9FBC", "#3E6E9E"),
@@ -158,6 +286,34 @@ def dash(value):
     Checks for None specifically rather than falsiness, so a genuine
     reading of 0% humidity still displays as 0."""
     return "\u2014" if value is None else value
+
+
+def glossary_entries():
+    """The glossary as a list, each entry carrying its reference links.
+
+    The NWS index is browsed by first letter, so that URL is derived from
+    the lookup term rather than stored nine times over."""
+    entries = []
+    for key, entry in GLOSSARY.items():
+        term = entry["lookup"]
+        entries.append(
+            {
+                "key": key,
+                "title": entry["title"],
+                "text": entry["text"],
+                "sources": [
+                    {
+                        "label": "AMS Glossary",
+                        "url": AMS_SEARCH_URL.format(term=quote_plus(term)),
+                    },
+                    {
+                        "label": "NWS / NOAA glossary",
+                        "url": NWS_GLOSSARY_URL.format(letter=term[0].lower()),
+                    },
+                ],
+            }
+        )
+    return entries
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +417,6 @@ def build_sky(code, sunrise, sunset, now):
         "veil": veil,
         "panel": panel,
         "accent": accent,
-        "night": phase == "night",
     }
 
 
@@ -270,7 +425,7 @@ def sun_arc(sunrise, sunset, now, width=280, height=64, inset=10):
 
     The arc is a half-ellipse from sunrise on the left to sunset on the
     right. Before sunrise or after sunset the marker parks at the nearest
-    end and the template swaps it for a moon."""
+    end and the template dims it."""
     if not (sunrise and sunset and now) or sunset <= sunrise:
         return None
 
@@ -284,23 +439,16 @@ def sun_arc(sunrise, sunset, now, width=280, height=64, inset=10):
     centre_x = width / 2
     baseline = height
 
-    # A half-ellipse swept left to right, drawn with one SVG arc command.
     path = (
         f"M {inset},{baseline} "
         f"A {radius_x},{radius_y} 0 0 1 {width - inset},{baseline}"
     )
 
-    # Parametric position along that same ellipse.
-    from math import cos, pi, sin
-
     angle = pi * progress
-    x = centre_x - radius_x * cos(angle)
-    y = baseline - radius_y * sin(angle)
-
     return {
         "path": path,
-        "x": round(x, 1),
-        "y": round(y, 1),
+        "x": round(centre_x - radius_x * cos(angle), 1),
+        "y": round(baseline - radius_y * sin(angle), 1),
         "width": width,
         "height": height,
         "baseline": baseline,
@@ -371,32 +519,51 @@ def visibility_label(meters, imperial):
 # ---------------------------------------------------------------------------
 
 def find_place(name):
-    """Turn a city name into coordinates. Returns None if nothing matches."""
+    """Turn a city name into coordinates. Returns None if nothing matches.
+
+    Cached permanently -- Denver's coordinates are not going to move, and
+    repeat searches for the same city are the common case."""
+    key = name.strip().lower()
+    if key in _geocode_cache:
+        return _geocode_cache[key]
+
     response = requests.get(
         GEOCODE_URL, params={"name": name, "count": 1}, timeout=10
     )
     response.raise_for_status()
     results = response.json().get("results")
     if not results:
+        _geocode_cache[key] = None
         return None
 
     place = results[0]
     region = ", ".join(
         part for part in (place.get("admin1"), place.get("country")) if part
     )
-    return {
+    found = {
         "name": place.get("name", name),
         "region": region,
         "latitude": place["latitude"],
         "longitude": place["longitude"],
     }
+    _geocode_cache[key] = found
+    return found
 
 
 def get_forecast(latitude, longitude, units):
     """Fetch current conditions, the next 24 hours, and the next 5 days.
 
+    Cached for ten minutes per location and unit system. Open-Meteo only
+    updates its data a few times an hour anyway, so this costs you nothing
+    in freshness and saves an enormous number of requests.
+
     Everything below arrives in one single request -- adding names to these
     three strings costs no extra API calls."""
+    key = f"{latitude:.3f},{longitude:.3f},{units}"
+    cached = _forecast_cache.get(key)
+    if cached and time.time() - cached["at"] < FORECAST_TTL:
+        return cached["value"]
+
     imperial = units == "imperial"
     response = requests.get(
         FORECAST_URL,
@@ -420,7 +587,9 @@ def get_forecast(latitude, longitude, units):
         timeout=10,
     )
     response.raise_for_status()
-    return response.json()
+    payload = response.json()
+    _forecast_cache[key] = {"at": time.time(), "value": payload}
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -553,8 +722,7 @@ def get_discussion(latitude, longitude):
     """The forecaster's own narrative, or None if unavailable.
 
     This is a bonus panel on top of a working page, so it swallows every
-    error rather than being allowed to take the site down. A slow or
-    grumpy NWS server should cost you this section, not the forecast."""
+    error rather than being allowed to take the site down."""
     try:
         point = nws_point(latitude, longitude)
         if point is None:
@@ -651,8 +819,11 @@ def build_trace(hourly, width=720, height=140, padding=18):
     }
 
 
-def build_conditions(data, index, units):
-    """The detail panel: everything beyond temperature and wind."""
+def build_readings(data, index, units, degree, speed):
+    """The instrument panel, as data rather than nine blocks of template.
+
+    Each reading carries the glossary key it explains, so adding a tenth
+    reading here wires up its definition link automatically."""
     imperial = units == "imperial"
     hourly = data.get("hourly") or {}
     current = data.get("current") or {}
@@ -669,18 +840,64 @@ def build_conditions(data, index, units):
         change = now_pressure - past_pressure
         trend = "rising" if change > 1 else "falling" if change < -1 else "steady"
 
-    return {
-        "dew_point": whole(at(hourly.get("dew_point_2m"), index)),
-        "visibility": visibility_label(at(hourly.get("visibility"), index), imperial),
-        "uv": whole(uv),
-        "uv_label": uv_label(uv),
-        "cloud_cover": whole(current.get("cloud_cover")),
-        "pressure": whole(current.get("pressure_msl")),
-        "trend": trend,
-        "gusts": whole(current.get("wind_gusts_10m")),
-        "direction": compass(current.get("wind_direction_10m")),
-        "chance": whole(at(hourly.get("precipitation_probability"), index)),
-    }
+    direction = compass(current.get("wind_direction_10m"))
+
+    return [
+        {
+            "term": "wind",
+            "label": "Wind",
+            "value": whole(current.get("wind_speed_10m")),
+            "note": f"{speed} {direction}" if direction else speed,
+        },
+        {
+            "term": "gust",
+            "label": "Gusts",
+            "value": whole(current.get("wind_gusts_10m")),
+            "note": speed,
+        },
+        {
+            "term": "humidity",
+            "label": "Humidity",
+            "value": whole(current.get("relative_humidity_2m")),
+            "note": "%",
+        },
+        {
+            "term": "dew-point",
+            "label": "Dew point",
+            "value": whole(at(hourly.get("dew_point_2m"), index)),
+            "note": f"°{degree}",
+        },
+        {
+            "term": "uv-index",
+            "label": "UV index",
+            "value": whole(uv),
+            "note": uv_label(uv) or "",
+        },
+        {
+            "term": "rain-chance",
+            "label": "Rain chance",
+            "value": whole(at(hourly.get("precipitation_probability"), index)),
+            "note": "%",
+        },
+        {
+            "term": "cloud-cover",
+            "label": "Cloud cover",
+            "value": whole(current.get("cloud_cover")),
+            "note": "%",
+        },
+        {
+            "term": "pressure",
+            "label": "Pressure",
+            "value": whole(current.get("pressure_msl")),
+            "note": f"hPa · {trend}" if trend else "hPa",
+        },
+        {
+            "term": "visibility",
+            "label": "Visibility",
+            "value": visibility_label(at(hourly.get("visibility"), index), imperial),
+            "note": "",
+        },
+    ]
 
 
 def build_days(data):
@@ -737,19 +954,21 @@ def build_days(data):
 def home():
     city = request.args.get("city", "Denver").strip() or "Denver"
     units = "metric" if request.args.get("units") == "metric" else "imperial"
+    degree = "F" if units == "imperial" else "C"
+    speed = "mph" if units == "imperial" else "km/h"
 
     def page(**extra):
-        """Every render needs the unit labels and a palette, including the
-        error ones -- otherwise a failed search renders unstyled."""
-        extra.setdefault(
-            "sky", build_sky(3, None, None, None)  # neutral overcast fallback
-        )
+        """Every render needs the unit labels, a palette and the glossary,
+        including the error ones -- otherwise a failed search renders
+        unstyled and without its reference section."""
+        extra.setdefault("sky", build_sky(3, None, None, None))
         return render_template(
             "index.html",
             city=city,
             units=units,
-            degree="F" if units == "imperial" else "C",
-            speed="mph" if units == "imperial" else "km/h",
+            degree=degree,
+            speed=speed,
+            glossary=glossary_entries(),
             **extra,
         )
 
@@ -762,11 +981,29 @@ def home():
             )
         data = get_forecast(place["latitude"], place["longitude"], units)
     except requests.Timeout:
+        traceback.print_exc()
         return page(error="The weather service took too long to answer. Try again.")
-    except requests.RequestException:
+    except requests.HTTPError as failure:
+        # Open-Meteo answered, but with an error code. 429 means the free
+        # quota is spent -- by far the most likely cause on a public site.
+        status = getattr(failure.response, "status_code", None)
+        traceback.print_exc()
+        print(f"[open-meteo] HTTP {status} for city={city!r}")
+        if status == 429:
+            return page(
+                error="This site has hit Open-Meteo's free request limit "
+                "for now. It resets shortly \u2014 try again in a little while."
+            )
         return page(
-            error="Couldn't reach the weather service. Check your connection "
-            "and try again."
+            error=f"The weather service refused the request (error {status})."
+        )
+    except requests.RequestException as failure:
+        # Couldn't reach them at all: DNS, TLS, refused connection.
+        traceback.print_exc()
+        print(f"[open-meteo] connection failed: {type(failure).__name__}")
+        return page(
+            error="Couldn't reach the weather service. It may be briefly "
+            "down \u2014 try again in a moment."
         )
     except ValueError:
         return page(error="The weather service sent back something unreadable.")
@@ -790,17 +1027,14 @@ def home():
             hourly=hourly,
             trace=build_trace(hourly),
             days=build_days(data),
-            conditions=build_conditions(data, index, units),
+            readings=build_readings(data, index, units, degree, speed),
             discussion=get_discussion(place["latitude"], place["longitude"]),
             sky=build_sky(code, sunrise, sunset, now),
             arc=sun_arc(sunrise, sunset, now),
             current={
                 "temp": whole(current.get("temperature_2m")),
                 "feels": whole(current.get("apparent_temperature")),
-                "humidity": whole(current.get("relative_humidity_2m")),
-                "wind": whole(current.get("wind_speed_10m")),
                 "summary": describe(code),
-                "is_day": current.get("is_day", 1) == 1,
             },
             sunrise=clock(at(daily.get("sunrise"), 0)),
             sunset=clock(at(daily.get("sunset"), 0)),
@@ -815,4 +1049,3 @@ def home():
 
 if __name__ == "__main__":
     app.run(debug=True)
-
