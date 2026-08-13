@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ city }} — Weather Station</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<style>
+  /* Minimal styling for the discussion panel, kept here so it works
+     before you've touched style.css. Move it over when you're ready. */
+  .discussion { margin: 2rem 0; }
+  .discussion > h2 { margin-bottom: .25rem; }
+  .discussion .issued { font-size: .8rem; opacity: .7; margin-top: 0; }
+  .discussion details {
+    border-top: 1px solid currentColor;
+    padding: .6rem 0;
+  }
+  .discussion summary {
+    cursor: pointer;
+    font-weight: 500;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    font-size: .78rem;
+  }
+  /* AFDs are fixed-width teletype text -- a monospace font and preserved
+     line breaks are what make them readable. */
+  .discussion pre {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: .82rem;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    overflow-wrap: break-word;
+    margin: .6rem 0 0;
+  }
+  .elsewhere { display: flex; flex-wrap: wrap; gap: .75rem; margin-top: 1rem; }
+  .elsewhere a { font-size: .8rem; }
+</style>
+</head>
+<body>
+<main class="station">
+
+  <header class="masthead">
+    <p class="eyebrow">Weather Station</p>
+    <form class="search" action="/" method="get" role="search">
+      <input type="search" name="city" value="{{ city }}"
+             aria-label="City" placeholder="Search a city" autocomplete="off">
+      <input type="hidden" name="units" value="{{ units }}">
+      <button type="submit">Look up</button>
+    </form>
+    {# urlencode matters here: without it, any city containing an ampersand
+       silently truncates the link and the toggle stops working. #}
+    <a class="units"
+       href="/?city={{ city | urlencode }}&units={{ 'metric' if units == 'imperial' else 'imperial' }}">
+      {{ '°C' if units == 'imperial' else '°F' }}
+    </a>
+  </header>
+
+  {% if error %}
+    <p class="error">{{ error }}</p>
+  {% else %}
+
+  <section class="reading">
+    <div class="place">
+      <h1>{{ place.name }}</h1>
+      <p class="region">{{ place.region }}</p>
+      <p class="summary {{ 'night' if not current.is_day }}">{{ current.summary }}</p>
+    </div>
+    <div class="now">
+      <p class="temp">{{ current.temp | dash }}<span class="degree">°{{ degree }}</span></p>
+      <p class="feels">Feels like {{ current.feels | dash }}°</p>
+    </div>
+  </section>
+
+  {% if trace %}
+  <section class="trace" aria-label="Temperature over the next 24 hours">
+    <div class="trace-head">
+      <span>Next 24 hours</span>
+      <span class="range">{{ trace.low }}° low · {{ trace.high }}° high</span>
+    </div>
+    <svg viewBox="0 0 {{ trace.width }} {{ trace.height }}" preserveAspectRatio="none"
+         role="img" aria-label="Line chart of hourly temperature">
+      <polygon class="fill" points="{{ trace.area }}"></polygon>
+      <polyline class="line" points="{{ trace.line }}"></polyline>
+      <circle class="mark" cx="{{ trace.points[0].x }}" cy="{{ trace.points[0].y }}" r="4"></circle>
+    </svg>
+    <ol class="hours">
+      {% for point in hourly %}
+        {% if loop.index0 % 4 == 0 %}
+          <li title="{{ point.temp | round | int }}°{{ degree }}{% if point.chance is not none %} · {{ point.chance }}% rain{% endif %}">{{ point.hour }}</li>
+        {% endif %}
+      {% endfor %}
+    </ol>
+  </section>
+  {% endif %}
+
+  <dl class="instruments">
+    <div>
+      <dt>Wind</dt>
+      <dd>{{ current.wind | dash }} <span>{{ speed }}{% if conditions.direction %} {{ conditions.direction }}{% endif %}</span></dd>
+    </div>
+    <div>
+      <dt>Gusts</dt>
+      <dd>{{ conditions.gusts | dash }} <span>{{ speed }}</span></dd>
+    </div>
+    <div>
+      <dt>Humidity</dt>
+      <dd>{{ current.humidity | dash }}<span>%</span></dd>
+    </div>
+    <div>
+      <dt>Dew point</dt>
+      <dd>{{ conditions.dew_point | dash }}<span>°{{ degree }}</span></dd>
+    </div>
+    <div>
+      <dt>UV index</dt>
+      <dd>{{ conditions.uv | dash }} <span>{{ conditions.uv_label or '' }}</span></dd>
+    </div>
+    <div>
+      <dt>Rain chance</dt>
+      <dd>{{ conditions.chance | dash }}<span>%</span></dd>
+    </div>
+    <div>
+      <dt>Cloud cover</dt>
+      <dd>{{ conditions.cloud_cover | dash }}<span>%</span></dd>
+    </div>
+    <div>
+      <dt>Pressure</dt>
+      <dd>{{ conditions.pressure | dash }} <span>hPa{% if conditions.trend %} · {{ conditions.trend }}{% endif %}</span></dd>
+    </div>
+    <div>
+      <dt>Visibility</dt>
+      <dd>{{ conditions.visibility | dash }}</dd>
+    </div>
+    <div>
+      <dt>Sunrise</dt>
+      <dd>{{ sunrise | dash }}</dd>
+    </div>
+    <div>
+      <dt>Sunset</dt>
+      <dd>{{ sunset | dash }}</dd>
+    </div>
+  </dl>
+
+  {% if days %}
+  <section class="outlook">
+    <h2>Five days</h2>
+    {% for day in days %}
+    <div class="day">
+      <span class="label">{{ day.label }}</span>
+      <span class="conditions">{{ day.summary }}</span>
+      <span class="low">{{ day.low }}°</span>
+      <span class="bar">
+        <span class="span" style="margin-left: {{ day.offset }}%; width: {{ day.length }}%"></span>
+      </span>
+      <span class="high">{{ day.high }}°</span>
+    </div>
+    {% endfor %}
+  </section>
+  {% endif %}
+
+  {# US locations only -- api.weather.gov has nothing for anywhere else,
+     so this whole block simply doesn't render for Tokyo or London. #}
+  {% if discussion %}
+  <section class="discussion">
+    <h2>Forecaster's discussion</h2>
+    <p class="issued">
+      {{ discussion.office_name or 'National Weather Service' }}{% if discussion.issued %} · issued {{ discussion.issued }}{% endif %}
+    </p>
+
+    {% for section in discussion.sections %}
+      {# The first section opens by default; the rest stay folded away,
+         since a full AFD runs longer than the entire page above it. #}
+      <details {% if loop.first %}open{% endif %}>
+        <summary>{{ section.title }}</summary>
+        <pre>{{ section.body }}</pre>
+      </details>
+    {% endfor %}
+
+    <div class="elsewhere">
+      <a href="{{ discussion.office_url }}" rel="noopener">NWS {{ discussion.office }} office</a>
+      {% for link in discussion.links %}
+        <a href="{{ link.url }}" rel="noopener">COD NEXLAB — {{ link.label }}</a>
+      {% endfor %}
+    </div>
+  </section>
+  {% endif %}
+
+  {% endif %}
+
+  <footer>
+    Readings from <a href="https://open-meteo.com/" rel="noopener">Open-Meteo</a>.
+    Discussion text from the
+    <a href="https://www.weather.gov/" rel="noopener">National Weather Service</a>
+    (public domain).
+  </footer>
+</main>
+</body>
+</html>
