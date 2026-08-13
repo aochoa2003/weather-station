@@ -2,7 +2,10 @@
 A small weather website built with Flask and the Open-Meteo API,
 with the National Weather Service Area Forecast Discussion layered on top.
 
-Open-Meteo is free and needs no API key, so this runs as-is.
+The page's colour scheme is derived from the actual sky at the searched
+location -- see build_sky() near the bottom. Nothing is hardcoded; a clear
+noon and an overcast midnight produce genuinely different pages.
+
 Start it with:  python app.py
 Then open:      http://127.0.0.1:5000
 
@@ -14,7 +17,7 @@ requests carrying a generic User-Agent get blocked.
 import re
 import time
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import requests
 from flask import Flask, render_template, request
@@ -22,7 +25,7 @@ from flask import Flask, render_template, request
 app = Flask(__name__)
 
 # --- CHANGE THIS to your own email address --------------------------------
-CONTACT = "mexico.ao92@gmail.com"
+CONTACT = "you@example.com"
 # --------------------------------------------------------------------------
 
 GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
@@ -37,19 +40,13 @@ NWS_HEADERS = {
     "Accept": "application/geo+json",
 }
 
-# Which forecast office covers a set of coordinates never changes, so that
-# lookup is cached indefinitely. Discussions are reissued a few times a day,
-# so those get a 15-minute window before we ask again.
 _point_cache = {}
 _afd_cache = {}
 AFD_TTL = 900
 
-# Section headers in an AFD look like ".SHORT TERM /Through 6 PM Wednesday/..."
 AFD_SECTION = re.compile(r"^\.([A-Z][^\n.]{1,90})\.\.\.", re.MULTILINE)
 AFD_TIMESTAMP = re.compile(r"^\d{3,4}\s+(AM|PM)\s+\w{2,4}\s+\w{3}\s+\w{3}", re.I)
 
-# Open-Meteo reports conditions as WMO weather codes. This maps the ones
-# you'll actually see to plain English.
 WEATHER_CODES = {
     0: "Clear",
     1: "Mainly clear",
@@ -86,6 +83,31 @@ COMPASS = [
     "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW",
 ]
 
+# Daytime gradient for each kind of sky: horizon-down, mid, zenith.
+CONDITION_STOPS = {
+    "clear": ("#B9DCF5", "#5FA3E0", "#1B62B5"),
+    "cloudy": ("#C2CFD9", "#7E9FBC", "#3E6E9E"),
+    "overcast": ("#AEB7BF", "#7C8894", "#4E5A66"),
+    "fog": ("#C4C6C7", "#989C9F", "#6E7478"),
+    "rain": ("#7E97A5", "#4F6B7A", "#2E4451"),
+    "snow": ("#D2DEE7", "#96A8B8", "#5D6F80"),
+    "storm": ("#576072", "#333B4C", "#161C29"),
+}
+
+CONDITION_ACCENTS = {
+    "clear": "#FFC24D",
+    "cloudy": "#FFD08A",
+    "overcast": "#E8C46A",
+    "fog": "#D9D3BA",
+    "rain": "#6FD3E8",
+    "snow": "#E8F4FF",
+    "storm": "#FFE066",
+}
+
+NIGHT_TINT = "#060A1A"
+DAWN_TINT = "#F09A5A"
+DUSK_TINT = "#E06A45"
+
 
 # ---------------------------------------------------------------------------
 # Small helpers for surviving missing data
@@ -120,6 +142,16 @@ def at(values, index):
     return values[index]
 
 
+def moment(timestamp):
+    """Parse an ISO timestamp, returning None rather than raising."""
+    if not timestamp:
+        return None
+    try:
+        return datetime.fromisoformat(timestamp)
+    except (TypeError, ValueError):
+        return None
+
+
 @app.template_filter("dash")
 def dash(value):
     """Render missing readings as a dash rather than the word 'None'.
@@ -129,27 +161,173 @@ def dash(value):
 
 
 # ---------------------------------------------------------------------------
+# Colour maths for the sky palette
+# ---------------------------------------------------------------------------
+
+def to_rgb(value):
+    value = value.lstrip("#")
+    return tuple(int(value[i : i + 2], 16) for i in (0, 2, 4))
+
+
+def to_hex(rgb):
+    return "#" + "".join(f"{max(0, min(255, round(c))):02X}" for c in rgb)
+
+
+def mix(first, second, amount):
+    """Blend two colours. amount=0 returns the first, 1 returns the second."""
+    a, b = to_rgb(first), to_rgb(second)
+    return to_hex(tuple(a[i] + (b[i] - a[i]) * amount for i in range(3)))
+
+
+def brightness(value):
+    """Perceived lightness, 0 to 1. Green dominates because human eyes
+    are most sensitive to it -- this is why a pure blue reads as darker
+    than a pure green of the same numeric value."""
+    r, g, b = to_rgb(value)
+    return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255
+
+
+def condition_group(code):
+    """Collapse 27 WMO codes into the seven skies worth colouring."""
+    if code in (0, 1):
+        return "clear"
+    if code == 2:
+        return "cloudy"
+    if code == 3:
+        return "overcast"
+    if code in (45, 48):
+        return "fog"
+    if code in (95, 96, 99):
+        return "storm"
+    if code in (71, 73, 75, 77, 85, 86):
+        return "snow"
+    if code in (51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82):
+        return "rain"
+    return "cloudy"
+
+
+def day_phase(sunrise, sunset, now):
+    """Which of the four light phases we're in. The 50-minute windows
+    around sunrise and sunset are where the sky does its most interesting
+    colour work, so they get phases of their own."""
+    if not (sunrise and sunset and now):
+        return "day"
+    edge = timedelta(minutes=50)
+    if abs(now - sunrise) <= edge:
+        return "dawn"
+    if abs(now - sunset) <= edge:
+        return "dusk"
+    if sunrise <= now <= sunset:
+        return "day"
+    return "night"
+
+
+def build_sky(code, sunrise, sunset, now):
+    """Derive the whole page palette from the actual sky.
+
+    Returns CSS custom property values. Everything downstream -- text,
+    panels, borders, the accent -- is computed from these three gradient
+    stops so the page stays legible whatever the weather does."""
+    condition = condition_group(code)
+    phase = day_phase(sunrise, sunset, now)
+    stops = CONDITION_STOPS.get(condition, CONDITION_STOPS["cloudy"])
+    accent = CONDITION_ACCENTS.get(condition, "#FFD08A")
+
+    if phase == "night":
+        stops = tuple(mix(stop, NIGHT_TINT, 0.80) for stop in stops)
+        accent = "#AFC3F0" if condition == "clear" else mix(accent, "#8FA6D8", 0.45)
+    elif phase == "dawn":
+        stops = tuple(mix(stop, DAWN_TINT, 0.34) for stop in stops)
+    elif phase == "dusk":
+        stops = tuple(mix(stop, DUSK_TINT, 0.36) for stop in stops)
+
+    # Pick ink that survives whatever gradient we just built.
+    light_background = brightness(stops[1]) > 0.52
+    ink = "#0B1119" if light_background else "#F2F7FB"
+    veil = "255, 255, 255" if light_background else "12, 18, 30"
+    panel = 0.46 if light_background else 0.34
+
+    # An accent tuned for a bright sky can vanish on a dark one.
+    if light_background and brightness(accent) > 0.72:
+        accent = mix(accent, "#6B4A00", 0.42)
+
+    return {
+        "phase": phase,
+        "condition": condition,
+        "horizon": stops[0],
+        "middle": stops[1],
+        "zenith": stops[2],
+        "ink": ink,
+        "veil": veil,
+        "panel": panel,
+        "accent": accent,
+        "night": phase == "night",
+    }
+
+
+def sun_arc(sunrise, sunset, now, width=280, height=64, inset=10):
+    """Where the sun sits on its daily arc, as SVG coordinates.
+
+    The arc is a half-ellipse from sunrise on the left to sunset on the
+    right. Before sunrise or after sunset the marker parks at the nearest
+    end and the template swaps it for a moon."""
+    if not (sunrise and sunset and now) or sunset <= sunrise:
+        return None
+
+    total = (sunset - sunrise).total_seconds()
+    elapsed = (now - sunrise).total_seconds()
+    progress = max(0.0, min(1.0, elapsed / total))
+    up = 0 <= elapsed <= total
+
+    radius_x = (width - inset * 2) / 2
+    radius_y = height - inset
+    centre_x = width / 2
+    baseline = height
+
+    # A half-ellipse swept left to right, drawn with one SVG arc command.
+    path = (
+        f"M {inset},{baseline} "
+        f"A {radius_x},{radius_y} 0 0 1 {width - inset},{baseline}"
+    )
+
+    # Parametric position along that same ellipse.
+    from math import cos, pi, sin
+
+    angle = pi * progress
+    x = centre_x - radius_x * cos(angle)
+    y = baseline - radius_y * sin(angle)
+
+    return {
+        "path": path,
+        "x": round(x, 1),
+        "y": round(y, 1),
+        "width": width,
+        "height": height,
+        "baseline": baseline,
+        "up": up,
+        "progress": round(progress * 100),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Formatting
 # ---------------------------------------------------------------------------
 
-def hour_label(moment):
+def hour_label(when):
     """Format an hour as '2pm'. Written by hand because strftime's
     no-leading-zero flag differs between Windows and everything else."""
-    hour = moment.hour % 12 or 12
-    return f"{hour}{'am' if moment.hour < 12 else 'pm'}"
+    hour = when.hour % 12 or 12
+    return f"{hour}{'am' if when.hour < 12 else 'pm'}"
 
 
 def clock(timestamp):
     """Format a timestamp as '6:12 am'. Returns None on missing or malformed
     input -- polar locations genuinely have no sunrise on some dates."""
-    if not timestamp:
+    when = moment(timestamp)
+    if when is None:
         return None
-    try:
-        moment = datetime.fromisoformat(timestamp)
-    except (TypeError, ValueError):
-        return None
-    hour = moment.hour % 12 or 12
-    return f"{hour}:{moment.minute:02d} {'am' if moment.hour < 12 else 'pm'}"
+    hour = when.hour % 12 or 12
+    return f"{hour}:{when.minute:02d} {'am' if when.hour < 12 else 'pm'}"
 
 
 def compass(degrees):
@@ -211,7 +389,6 @@ def find_place(name):
         "region": region,
         "latitude": place["latitude"],
         "longitude": place["longitude"],
-        "country_code": place.get("country_code"),
     }
 
 
@@ -276,10 +453,9 @@ def nws_point(latitude, longitude):
         _point_cache[key] = None
         return None
 
-    radar = props.get("radarStation")  # e.g. "KFTG" for Denver
     point = {
         "office": office,
-        "radar": radar,
+        "radar": props.get("radarStation"),  # e.g. "KFTG" for Denver
         "office_url": f"https://www.weather.gov/{office.lower()}/",
     }
     _point_cache[key] = point
@@ -325,8 +501,6 @@ def parse_afd(payload):
     body = text.replace("\r\n", "\n").replace("\r", "\n")
     matches = list(AFD_SECTION.finditer(body))
 
-    # Everything before the first section is the teletype header, which
-    # carries the office name and the issue time.
     head = body[: matches[0].start()] if matches else body
     office_name = None
     issued = None
@@ -349,11 +523,30 @@ def parse_afd(payload):
     if not sections:
         return None
 
-    return {
-        "office_name": office_name,
-        "issued": issued,
-        "sections": sections,
-    }
+    return {"office_name": office_name, "issued": issued, "sections": sections}
+
+
+def cod_links(point):
+    """Links out to College of DuPage NEXLAB.
+
+    COD publishes no API and reserves rights over its imagery, so this
+    hands visitors off to their site rather than pulling anything in.
+    Their radar pages key on the station code without its leading K."""
+    links = [
+        {"label": "Satellite & radar", "url": "https://weather.cod.edu/satrad/"},
+        {"label": "Forecast models", "url": "https://weather.cod.edu/forecast/"},
+    ]
+    radar = point.get("radar")
+    if radar and len(radar) == 4:
+        links.insert(
+            0,
+            {
+                "label": f"{radar} radar",
+                "url": "https://weather.cod.edu/satrad/nexrad/index.php"
+                f"?type={radar[1:]}-N0Q-1-24",
+            },
+        )
+    return links
 
 
 def get_discussion(latitude, longitude):
@@ -377,41 +570,10 @@ def get_discussion(latitude, longitude):
 
         if discussion is None:
             return None
-
         return {**discussion, **point, "links": cod_links(point)}
     except Exception:
         traceback.print_exc()
         return None
-
-
-def cod_links(point):
-    """Links out to College of DuPage NEXLAB.
-
-    COD publishes no API and reserves rights over its imagery, so this
-    hands visitors off to their site rather than pulling anything in.
-    Their radar pages key on the station code without its leading K."""
-    links = [
-        {
-            "label": "Satellite & radar",
-            "url": "https://weather.cod.edu/satrad/",
-        },
-        {
-            "label": "Forecast models",
-            "url": "https://weather.cod.edu/forecast/",
-        },
-    ]
-
-    radar = point.get("radar")
-    if radar and len(radar) == 4:
-        links.insert(
-            0,
-            {
-                "label": f"{radar} radar",
-                "url": "https://weather.cod.edu/satrad/nexrad/index.php"
-                f"?type={radar[1:]}-N0Q-1-24",
-            },
-        )
-    return links
 
 
 # ---------------------------------------------------------------------------
@@ -444,23 +606,19 @@ def build_hourly(data, index):
     window = []
     for offset in range(24):
         position = index + offset
-        time_value = at(times, position)
+        when = moment(at(times, position))
         reading = num(at(temps, position))
-        if time_value is None or reading is None:
+        if when is None or reading is None:
             continue
-        try:
-            moment = datetime.fromisoformat(time_value)
-        except (TypeError, ValueError):
-            continue
-        window.append((moment, reading, whole(at(chances, position))))
+        window.append((when, reading, whole(at(chances, position))))
 
     return [
-        {"hour": hour_label(moment), "temp": temp, "chance": chance, "index": i}
-        for i, (moment, temp, chance) in enumerate(window)
+        {"hour": hour_label(when), "temp": temp, "chance": chance, "index": i}
+        for i, (when, temp, chance) in enumerate(window)
     ]
 
 
-def build_trace(hourly, width=720, height=120, padding=14):
+def build_trace(hourly, width=720, height=140, padding=18):
     """Turn the hourly temperatures into SVG coordinates for the line chart.
     Returns None when there's nothing to draw -- guard with {% if trace %}."""
     if not hourly:
@@ -498,7 +656,6 @@ def build_conditions(data, index, units):
     imperial = units == "imperial"
     hourly = data.get("hourly") or {}
     current = data.get("current") or {}
-    daily = data.get("daily") or {}
 
     uv = num(at(hourly.get("uv_index"), index))
 
@@ -557,21 +714,12 @@ def build_days(data):
 
     days = []
     for i, row in enumerate(rows):
-        try:
-            weekday = datetime.fromisoformat(row["date"]).strftime("%a")
-        except (TypeError, ValueError):
-            weekday = ""
-
-        # Fold rain chance into the existing conditions text rather than
-        # adding a new element, so the current CSS grid stays intact.
-        summary = describe(row["code"])
-        if row["chance"]:
-            summary = f"{summary} \u00b7 {row['chance']}%"
-
+        when = moment(row["date"])
         days.append(
             {
-                "label": "Today" if i == 0 else weekday,
-                "summary": summary,
+                "label": "Today" if i == 0 else (when.strftime("%a") if when else ""),
+                "summary": describe(row["code"]),
+                "chance": row["chance"],
                 "high": row["high"],
                 "low": row["low"],
                 "offset": (row["low"] - floor) / span * 100,
@@ -591,7 +739,11 @@ def home():
     units = "metric" if request.args.get("units") == "metric" else "imperial"
 
     def page(**extra):
-        """Every render needs the unit labels, including the error ones."""
+        """Every render needs the unit labels and a palette, including the
+        error ones -- otherwise a failed search renders unstyled."""
+        extra.setdefault(
+            "sky", build_sky(3, None, None, None)  # neutral overcast fallback
+        )
         return render_template(
             "index.html",
             city=city,
@@ -625,6 +777,14 @@ def home():
         index = current_index(data)
         hourly = build_hourly(data, index)
 
+        # All three are local time for the searched city, because the
+        # request asked for timezone=auto. That's what makes the palette
+        # reflect the sky there rather than the sky where the server is.
+        now = moment(current.get("time"))
+        sunrise = moment(at(daily.get("sunrise"), 0))
+        sunset = moment(at(daily.get("sunset"), 0))
+        code = current.get("weather_code")
+
         return page(
             place=place,
             hourly=hourly,
@@ -632,12 +792,14 @@ def home():
             days=build_days(data),
             conditions=build_conditions(data, index, units),
             discussion=get_discussion(place["latitude"], place["longitude"]),
+            sky=build_sky(code, sunrise, sunset, now),
+            arc=sun_arc(sunrise, sunset, now),
             current={
                 "temp": whole(current.get("temperature_2m")),
                 "feels": whole(current.get("apparent_temperature")),
                 "humidity": whole(current.get("relative_humidity_2m")),
                 "wind": whole(current.get("wind_speed_10m")),
-                "summary": describe(current.get("weather_code")),
+                "summary": describe(code),
                 "is_day": current.get("is_day", 1) == 1,
             },
             sunrise=clock(at(daily.get("sunrise"), 0)),
