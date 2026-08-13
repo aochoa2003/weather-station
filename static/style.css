@@ -1,298 +1,492 @@
+/* ==========================================================================
+   Weather Station
+
+   The palette is not defined here. Five custom properties -- --horizon,
+   --middle, --zenith, --ink and --accent -- arrive on the <body> tag from
+   Python, computed from the real sky at the searched location. Everything
+   below derives from those, which is why one static stylesheet can look
+   like a clear noon and a stormy midnight.
+
+   Never hardcode a colour in this file. Reach for a var() instead.
+   ========================================================================== */
+
 :root {
-  --paper: #e9edea;
-  --ink: #10202a;
-  --muted: #5e727b;
-  --rule: #c3cdcb;
-  --teal: #0d6e7a;
-  --amber: #b8741c;
+  --measure: 62rem;
+  --gap: 1.5rem;
+  --radius: 14px;
+
+  --display: "Instrument Serif", Georgia, serif;
+  --body: "Archivo", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, monospace;
+
+  --edge: rgba(var(--veil), 0.22);
+  --frost: rgba(var(--veil), var(--panel));
 }
 
-* { box-sizing: border-box; }
+*,
+*::before,
+*::after { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
 
 body {
   margin: 0;
-  padding: 32px 20px 64px;
-  background: var(--paper);
+  min-height: 100vh;
+  font-family: var(--body);
   color: var(--ink);
-  font-family: "IBM Plex Sans", system-ui, sans-serif;
-  -webkit-font-smoothing: antialiased;
+  /* Zenith at the top, horizon at the bottom -- the way you'd see it
+     standing outside and looking up. */
+  background:
+    linear-gradient(to bottom,
+      var(--zenith) 0%,
+      var(--middle) 52%,
+      var(--horizon) 100%)
+    fixed;
+  background-color: var(--middle);
+}
+
+/* Storms get a faint vignette so the page feels heavier under one. */
+body[data-condition="storm"]::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(ellipse at 50% 0%, transparent 40%, rgba(0, 0, 0, 0.35) 100%);
 }
 
 .station {
-  max-width: 760px;
+  max-width: var(--measure);
   margin: 0 auto;
+  padding: 2.5rem 1.5rem 4rem;
+  position: relative;
 }
 
-/* ── Masthead ─────────────────────────────────────────── */
+/* --- Masthead ------------------------------------------------------------ */
 
 .masthead {
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: var(--gap);
   flex-wrap: wrap;
-  padding-bottom: 20px;
-  border-bottom: 2px solid var(--ink);
-}
-
-.eyebrow {
-  margin: 0;
-  font-family: "IBM Plex Mono", monospace;
-  font-size: 11px;
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
-  color: var(--muted);
+  margin-bottom: 3rem;
 }
 
 .search {
   display: flex;
-  gap: 8px;
-  margin-left: auto;
+  gap: .5rem;
+  flex: 1 1 20rem;
 }
 
-.search input[type="search"] {
-  width: 200px;
-  padding: 8px 10px;
-  border: 1px solid var(--rule);
-  border-radius: 2px;
-  background: #fff;
-  color: var(--ink);
+.search input {
+  flex: 1;
   font: inherit;
-  font-size: 14px;
+  font-size: .95rem;
+  color: var(--ink);
+  padding: .6rem .9rem;
+  border: 1px solid var(--edge);
+  border-radius: 999px;
+  background: var(--frost);
+  backdrop-filter: blur(12px);
 }
+
+.search input::placeholder { color: var(--ink); opacity: .55; }
 
 .search button,
 .units {
-  padding: 8px 14px;
-  border: 1px solid var(--ink);
-  border-radius: 2px;
-  background: var(--ink);
-  color: var(--paper);
-  font-family: "IBM Plex Mono", monospace;
-  font-size: 12px;
-  letter-spacing: 0.06em;
-  text-decoration: none;
-  cursor: pointer;
-}
-
-.units {
-  background: none;
+  font: inherit;
+  font-size: .82rem;
+  font-weight: 500;
   color: var(--ink);
+  padding: .6rem 1.1rem;
+  border: 1px solid var(--edge);
+  border-radius: 999px;
+  background: var(--frost);
+  backdrop-filter: blur(12px);
+  cursor: pointer;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: background-color .18s ease, border-color .18s ease;
 }
 
 .search button:hover,
-.units:hover { background: var(--teal); border-color: var(--teal); color: #fff; }
-
-:focus-visible { outline: 2px solid var(--teal); outline-offset: 2px; }
-
-/* ── Current reading ──────────────────────────────────── */
-
-.reading {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 24px;
-  padding: 28px 0 24px;
-  border-bottom: 1px solid var(--rule);
+.units:hover {
+  background: rgba(var(--veil), calc(var(--panel) + 0.18));
+  border-color: var(--accent);
 }
 
-.reading h1 {
+:where(a, button, input, summary):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+/* --- The reading --------------------------------------------------------- */
+
+.reading {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: start;
+  gap: var(--gap);
+  margin-bottom: 3rem;
+}
+
+.place h1 {
+  font-family: var(--display);
+  font-size: clamp(2.75rem, 7vw, 4.5rem);
+  font-weight: 400;
+  line-height: .95;
+  letter-spacing: -0.01em;
   margin: 0;
-  font-family: "Big Shoulders Display", sans-serif;
-  font-size: clamp(48px, 11vw, 88px);
-  font-weight: 700;
-  line-height: 0.86;
-  letter-spacing: 0.01em;
-  text-transform: uppercase;
 }
 
 .region {
-  margin: 8px 0 0;
-  font-size: 14px;
-  color: var(--muted);
+  margin: .5rem 0 0;
+  font-size: .9rem;
+  opacity: .72;
 }
 
 .summary {
-  margin: 14px 0 0;
-  display: inline-block;
-  padding: 4px 10px;
-  background: var(--teal);
-  color: #fff;
-  font-family: "IBM Plex Mono", monospace;
-  font-size: 12px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  margin: 1.25rem 0 0;
+  font-size: 1.05rem;
+  font-weight: 500;
+  /* The one place the accent appears at full strength in the header. */
+  border-left: 3px solid var(--accent);
+  padding-left: .75rem;
 }
 
-.summary.night { background: var(--ink); }
-
-.now { text-align: right; flex-shrink: 0; }
+.now { text-align: right; }
 
 .temp {
+  font-family: var(--display);
+  font-size: clamp(4.5rem, 13vw, 8rem);
+  font-weight: 400;
+  line-height: .8;
   margin: 0;
-  font-family: "Big Shoulders Display", sans-serif;
-  font-size: clamp(76px, 18vw, 132px);
-  font-weight: 500;
-  line-height: 0.8;
-  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.03em;
 }
 
-.degree { font-size: 0.3em; color: var(--muted); vertical-align: super; }
+.temp .degree {
+  font-size: .3em;
+  vertical-align: super;
+  letter-spacing: 0;
+  opacity: .75;
+}
 
 .feels {
-  margin: 12px 0 0;
-  font-family: "IBM Plex Mono", monospace;
-  font-size: 12px;
-  color: var(--muted);
+  margin: .85rem 0 0;
+  font-size: .85rem;
+  opacity: .72;
 }
 
-/* ── The trace (signature element) ────────────────────── */
+/* --- Sun arc: the signature ---------------------------------------------- */
 
-.trace { padding: 24px 0 20px; border-bottom: 1px solid var(--rule); }
+.arc {
+  grid-column: 1 / -1;
+  margin: .5rem 0 0;
+  max-width: 280px;
+}
 
-.trace-head {
+.arc svg { width: 100%; height: auto; display: block; overflow: visible; }
+
+.arc .horizon {
+  stroke: var(--ink);
+  stroke-width: 1;
+  opacity: .28;
+}
+
+.arc .track {
+  fill: none;
+  stroke: var(--ink);
+  stroke-width: 1;
+  stroke-dasharray: 2 4;
+  opacity: .4;
+}
+
+.arc .body {
+  fill: var(--accent);
+  /* The glow is the only decorative flourish on the page. It earns its
+     place by being the thing that says "this is the sun". */
+  filter: drop-shadow(0 0 10px var(--accent));
+}
+
+.arc.down .body { opacity: .65; filter: none; }
+.arc.down .track { opacity: .22; }
+
+.arc figcaption {
   display: flex;
   justify-content: space-between;
-  font-family: "IBM Plex Mono", monospace;
-  font-size: 11px;
-  letter-spacing: 0.14em;
+  font-size: .7rem;
+  font-family: var(--mono);
+  opacity: .7;
+  margin-top: .4rem;
+}
+
+/* --- Panels -------------------------------------------------------------- */
+
+.panel {
+  background: var(--frost);
+  backdrop-filter: blur(16px);
+  border: 1px solid var(--edge);
+  border-radius: var(--radius);
+  padding: 1.5rem;
+  margin-bottom: var(--gap);
+}
+
+.panel-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 1rem;
+  margin-bottom: 1.25rem;
+}
+
+.panel-head h2 {
+  font-family: var(--body);
+  font-size: .74rem;
+  font-weight: 600;
   text-transform: uppercase;
-  color: var(--muted);
+  letter-spacing: .12em;
+  margin: 0;
+  opacity: .8;
 }
 
-.trace svg {
-  display: block;
-  width: 100%;
-  height: 120px;
-  margin-top: 12px;
-  overflow: visible;
+.panel-head span {
+  font-family: var(--mono);
+  font-size: .78rem;
+  opacity: .7;
 }
 
-.trace .fill { fill: var(--teal); opacity: 0.09; }
+/* --- 24-hour trace ------------------------------------------------------- */
 
+.trace svg { width: 100%; height: 140px; display: block; }
+.trace .fill { fill: var(--accent); opacity: .16; }
 .trace .line {
   fill: none;
-  stroke: var(--teal);
-  stroke-width: 2;
+  stroke: var(--accent);
+  stroke-width: 2.5;
   stroke-linejoin: round;
   vector-effect: non-scaling-stroke;
-  stroke-dasharray: 2000;
-  stroke-dashoffset: 2000;
-  animation: draw 1.6s ease-out forwards;
 }
-
-.trace .mark { fill: var(--amber); stroke: var(--paper); stroke-width: 2; }
-
-@keyframes draw { to { stroke-dashoffset: 0; } }
-
-@media (prefers-reduced-motion: reduce) {
-  .trace .line { animation: none; stroke-dashoffset: 0; }
+.trace .mark {
+  fill: var(--accent);
+  stroke: var(--ink);
+  stroke-width: 1.5;
 }
 
 .hours {
   display: flex;
   justify-content: space-between;
-  margin: 8px 0 0;
-  padding: 0;
   list-style: none;
-  font-family: "IBM Plex Mono", monospace;
-  font-size: 11px;
-  color: var(--muted);
+  margin: .6rem 0 0;
+  padding: 0;
+  font-family: var(--mono);
+  font-size: .72rem;
+  opacity: .68;
 }
 
-/* ── Instruments ──────────────────────────────────────── */
+/* --- Instruments --------------------------------------------------------- */
 
 .instruments {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 16px;
-  padding: 20px 0;
-  border-bottom: 1px solid var(--rule);
+  /* auto-fit rather than a fixed count, so adding a tenth reading later
+     doesn't require touching this file. */
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  gap: 1px;
+  margin: 0;
+  background: var(--edge);
+  border: 1px solid var(--edge);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.instruments > div {
+  background: rgba(var(--veil), calc(var(--panel) + 0.10));
+  padding: .9rem 1rem;
 }
 
 .instruments dt {
-  font-family: "IBM Plex Mono", monospace;
-  font-size: 11px;
-  letter-spacing: 0.14em;
+  font-size: .66rem;
   text-transform: uppercase;
-  color: var(--muted);
+  letter-spacing: .1em;
+  opacity: .62;
+  margin-bottom: .3rem;
 }
 
 .instruments dd {
-  margin: 6px 0 0;
-  font-size: 20px;
-  font-variant-numeric: tabular-nums;
-}
-
-.instruments dd span { font-size: 13px; color: var(--muted); }
-
-/* ── Five day outlook ─────────────────────────────────── */
-
-.outlook h2 {
-  margin: 24px 0 4px;
-  font-family: "IBM Plex Mono", monospace;
-  font-size: 11px;
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 1.3rem;
   font-weight: 500;
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
-  color: var(--muted);
+  line-height: 1.1;
 }
+
+.instruments dd span {
+  display: block;
+  font-family: var(--body);
+  font-size: .7rem;
+  font-weight: 400;
+  opacity: .6;
+  margin-top: .2rem;
+  min-height: 1em;
+}
+
+/* --- Five days ----------------------------------------------------------- */
 
 .day {
   display: grid;
-  grid-template-columns: 62px 1fr 40px 120px 40px;
+  grid-template-columns: 4rem 1fr 2.5rem minmax(6rem, 10rem) 2.5rem;
   align-items: center;
-  gap: 12px;
-  padding: 14px 0;
-  border-bottom: 1px solid var(--rule);
-  font-size: 14px;
+  gap: 1rem;
+  padding: .7rem 0;
+  border-top: 1px solid var(--edge);
 }
 
-.day .label { font-weight: 500; }
-.day .conditions { color: var(--muted); }
-.day .low, .day .high { font-variant-numeric: tabular-nums; text-align: right; }
-.day .low { color: var(--muted); }
+.day:first-of-type { border-top: 0; }
+
+.day .label { font-weight: 600; font-size: .9rem; }
+
+.day .conditions { font-size: .85rem; opacity: .78; }
+
+.day .conditions em {
+  font-style: normal;
+  font-family: var(--mono);
+  font-size: .75rem;
+  color: var(--accent);
+  margin-left: .4rem;
+}
+
+.day .low,
+.day .high {
+  font-family: var(--mono);
+  font-size: .85rem;
+}
+
+.day .low { opacity: .6; text-align: right; }
+.day .high { font-weight: 500; }
 
 .day .bar {
   display: block;
-  height: 4px;
-  background: var(--rule);
-  border-radius: 2px;
+  height: 5px;
+  border-radius: 999px;
+  background: rgba(var(--veil), 0.3);
 }
 
 .day .span {
   display: block;
   height: 100%;
-  min-width: 6px;
-  border-radius: 2px;
-  background: linear-gradient(90deg, var(--teal), var(--amber));
+  border-radius: 999px;
+  background: var(--accent);
 }
 
-/* ── Odds and ends ────────────────────────────────────── */
+/* --- Forecaster's discussion --------------------------------------------- */
+
+.issued {
+  font-family: var(--mono);
+  font-size: .72rem;
+  opacity: .68;
+  margin: -.6rem 0 1.25rem;
+}
+
+.discussion details {
+  border-top: 1px solid var(--edge);
+  padding: .1rem 0;
+}
+
+.discussion summary {
+  cursor: pointer;
+  padding: .7rem 0;
+  font-size: .74rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .1em;
+  list-style: none;
+}
+
+.discussion summary::-webkit-details-marker { display: none; }
+
+.discussion summary::before {
+  content: "+";
+  display: inline-block;
+  width: 1.1rem;
+  font-family: var(--mono);
+  color: var(--accent);
+}
+
+.discussion details[open] > summary::before { content: "−"; }
+
+/* Fixed-width because it IS fixed-width -- the forecaster typed it that
+   way and the line breaks carry meaning. */
+.discussion pre {
+  font-family: var(--mono);
+  font-size: .78rem;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  margin: 0 0 1rem 1.1rem;
+  opacity: .88;
+}
+
+.elsewhere {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .5rem;
+  margin-top: 1.25rem;
+  border-top: 1px solid var(--edge);
+  padding-top: 1.25rem;
+}
+
+.elsewhere a {
+  font-size: .74rem;
+  color: var(--ink);
+  text-decoration: none;
+  padding: .35rem .8rem;
+  border: 1px solid var(--edge);
+  border-radius: 999px;
+  transition: border-color .18s ease;
+}
+
+.elsewhere a:hover { border-color: var(--accent); }
+
+/* --- Odds and ends ------------------------------------------------------- */
 
 .error {
-  margin: 40px 0;
-  padding: 16px;
-  border-left: 3px solid var(--amber);
-  background: #fff;
-  font-size: 15px;
+  background: var(--frost);
+  backdrop-filter: blur(16px);
+  border: 1px solid var(--edge);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 1.25rem 1.5rem;
+  font-size: .95rem;
 }
 
 footer {
-  margin-top: 28px;
-  font-family: "IBM Plex Mono", monospace;
-  font-size: 11px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--muted);
+  margin-top: 2.5rem;
+  font-size: .74rem;
+  opacity: .6;
+  line-height: 1.7;
 }
 
-@media (max-width: 560px) {
-  .masthead { gap: 10px; }
-  .search { margin-left: 0; width: 100%; }
-  .search input[type="search"] { flex: 1; width: auto; }
-  .reading { flex-direction: column; align-items: flex-start; }
+footer a { color: var(--ink); }
+
+/* --- Responsive ---------------------------------------------------------- */
+
+@media (max-width: 40rem) {
+  .station { padding: 1.75rem 1rem 3rem; }
+  .reading { grid-template-columns: 1fr; }
   .now { text-align: left; }
-  .instruments { grid-template-columns: repeat(2, 1fr); }
-  .day { grid-template-columns: 52px 36px 1fr 36px; }
-  .day .conditions { display: none; }
+  .day {
+    grid-template-columns: 3.5rem 1fr 2.2rem 2.2rem;
+    row-gap: .3rem;
+  }
+  /* The range bar is the first thing to go when space is tight --
+     the numbers either side of it carry the same information. */
+  .day .bar { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
 }
