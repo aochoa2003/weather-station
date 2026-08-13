@@ -25,7 +25,7 @@ from flask import Flask, render_template, request
 app = Flask(__name__)
 
 # --- CHANGE THIS to your own email address --------------------------------
-CONTACT = "you@example.com"
+CONTACT = "mexico.ao92@gmail.com"
 # --------------------------------------------------------------------------
 
 GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
